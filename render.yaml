@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: lm-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./liquimoly.db
+      - key: PRICE_MARKUP
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11.6"
+      - key: BOT_TOKEN
+        value: "8671023359:AAHaPXcB5As4UzBWfrhjhEhlWIbdVOsdKtM"
+      - key: ADMIN_CHAT_ID
+        value: "455255915"

@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+sqlalchemy
+asyncpg
+alembic
+pydantic
+python-dotenv
+httpx
+requests
+apscheduler
+lxml
+greenlet
+aiosqlite
