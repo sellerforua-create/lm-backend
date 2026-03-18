@@ -121,6 +121,14 @@ async def trigger_import():
             if vc is not None and vc.text:
                 vendor_code = vc.text.strip()
 
+            # Collect params from XML
+            params = {}
+            for p_el in offer.findall("param"):
+                pname = p_el.get("name", "")
+                pval = p_el.text or ""
+                if pname and pval:
+                    params[pname] = pval
+
             # All pictures
             pictures = [p.text for p in offer.findall("picture") if p.text]
             image_url = pictures[0] if pictures else ""
@@ -162,6 +170,7 @@ async def trigger_import():
                 vendor_code=vendor_code,
                 image_url=image_url,
                 images=pictures if pictures else None,
+                params=params if params else None,
                 available=avail,
             )
             session.add(product)

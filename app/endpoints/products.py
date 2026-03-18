@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select
+import json
+
+from sqlalchemy import func, or_, select, text, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -80,6 +82,7 @@ async def get_products(
     max_price: float | None = None,
     season: str | None = None,
     search: str | None = None,
+    viscosity: str | None = None,
     sort: str = "new",
 ):
     query = select(Product).options(selectinload(Product.variants)).where(Product.available.is_(True))
@@ -102,6 +105,9 @@ async def get_products(
                 Product.category_name.ilike(f"%{search}%"),
             )
         )
+
+    if viscosity:
+        query = query.where(cast(Product.params, String).ilike(f"%{viscosity}%"))
 
     if min_price is not None:
         query = query.where(Product.min_price >= min_price)
@@ -156,6 +162,29 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
         for row in result.all()
         if row[1]
     ]
+
+
+@router.get("/viscosities")
+async def get_viscosities(db: AsyncSession = Depends(get_db)):
+    """Return list of available viscosities from products."""
+    result = await db.execute(
+        text("SELECT DISTINCT params FROM products WHERE params IS NOT NULL")
+    )
+    rows = result.fetchall()
+
+    viscosities = set()
+    for row in rows:
+        try:
+            raw = row[0]
+            p = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(p, dict):
+                value = p.get("Вязкость масла") or p.get("Вязкость")
+                if value:
+                    viscosities.add(str(value))
+        except Exception:
+            pass
+
+    return sorted(viscosities)
 
 
 @router.get("/{product_id}/variants")
