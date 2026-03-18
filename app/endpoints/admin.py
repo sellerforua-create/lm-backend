@@ -1,19 +1,30 @@
 from fastapi import APIRouter
-from sqlalchemy import text
-from app.core.database import engine
+from sqlalchemy import text, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.database import engine, Base
+from app.models.product import Product
+from app.models.category import Category
 import httpx
 import xml.etree.ElementTree as ET
 import os
+import re
 
 router = APIRouter()
 
-PRICE_MARKUP = float(os.getenv("PRICE_MARKUP", "20")) / 100
+PRICE_MARKUP = float(os.getenv("PRICE_MARKUP", "0")) / 100
 FEED_URL = "https://api.dropshipping.ua/api/feeds/3411.xml"
+
+
+def slugify(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_-]+", "-", text)
+    return text.strip("-")[:200]
 
 
 @router.post("/import")
 async def trigger_import():
-    """Download XML feed and insert all products into DB."""
+    """Download XML feed and insert all products into DB using ORM."""
 
     # 1. Fetch XML
     async with httpx.AsyncClient(timeout=120) as client:
@@ -24,7 +35,7 @@ async def trigger_import():
     if shop is None:
         return {"error": "no <shop> element in XML"}
 
-    # 2. Build category ID → name mapping
+    # 2. Build category map
     cat_map = {}
     cats_el = shop.find("categories")
     if cats_el is not None:
@@ -41,42 +52,50 @@ async def trigger_import():
     if not offers:
         return {"error": "0 offers found"}
 
-    # 3. Drop and recreate table (SQLite compatible)
+    # 3. Ensure tables exist
     async with engine.begin() as conn:
-        await conn.execute(text("DROP TABLE IF EXISTS products"))
-        await conn.execute(text("""
-            CREATE TABLE products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                external_id VARCHAR(255),
-                name TEXT NOT NULL,
-                description TEXT,
-                price FLOAT NOT NULL,
-                old_price FLOAT,
-                supplier_price FLOAT,
-                currency VARCHAR(10) DEFAULT 'UAH',
-                category_id INTEGER,
-                category_name VARCHAR(255),
-                vendor VARCHAR(255),
-                vendor_code VARCHAR(255),
-                image_url TEXT,
-                images TEXT,
-                available BOOLEAN DEFAULT 1,
-                xml_feed_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """))
+        await conn.run_sync(Base.metadata.create_all)
 
-    # 4. Insert products with real category names
+    # 4. Build category id → DB id mapping
+    async with AsyncSession(engine) as session:
+        # Clear existing products
+        await session.execute(text("DELETE FROM products"))
+        await session.execute(text("DELETE FROM categories"))
+        await session.commit()
+
+        # Insert categories
+        cat_db_ids = {}
+        for cat_id_str, cat_name in cat_map.items():
+            if not cat_id_str.isdigit():
+                continue
+            cat = Category(
+                id=int(cat_id_str),
+                name=cat_name,
+                slug=slugify(cat_name) + f"-{cat_id_str}",
+                product_count=0,
+            )
+            session.add(cat)
+        await session.commit()
+
+        for cat_id_str in cat_map:
+            if cat_id_str.isdigit():
+                cat_db_ids[cat_id_str] = int(cat_id_str)
+
+    # 5. Insert products
     inserted = 0
-    async with engine.begin() as conn:
+    used_group_ids = set()
+    used_slugs = set()
+
+    async with AsyncSession(engine) as session:
         for offer in offers:
             ext_id = offer.get("id", "")
             name_el = offer.find("name")
             price_el = offer.find("price")
             if name_el is None or price_el is None:
                 continue
-            name = name_el.text or ""
+            name = (name_el.text or "").strip()
+            if not name:
+                continue
             try:
                 supplier_price = float(price_el.text or 0)
             except (ValueError, TypeError):
@@ -86,57 +105,94 @@ async def trigger_import():
             desc = ""
             d = offer.find("description")
             if d is not None and d.text:
-                desc = d.text
+                # Strip HTML tags
+                desc = re.sub(r"<[^>]+>", "", d.text).strip()
 
-            # Map category ID to human-readable name
             cat_id_str = ""
             cat_name = ""
             c = offer.find("categoryId")
             if c is not None and c.text:
-                cat_id_str = c.text
+                cat_id_str = c.text.strip()
                 cat_name = cat_map.get(cat_id_str, cat_id_str)
 
-            vendor = ""
-            v = offer.find("vendor")
-            if v is not None and v.text:
-                vendor = v.text
-
+            vendor = "LIQUI MOLY"
             vendor_code = ""
             vc = offer.find("vendorCode")
             if vc is not None and vc.text:
-                vendor_code = vc.text
+                vendor_code = vc.text.strip()
 
-            image_url = ""
-            p = offer.find("picture")
-            if p is not None and p.text:
-                image_url = p.text
+            # All pictures
+            pictures = [p.text for p in offer.findall("picture") if p.text]
+            image_url = pictures[0] if pictures else ""
 
             avail = offer.get("available", "true") == "true"
-
             cat_id_int = int(cat_id_str) if cat_id_str.isdigit() else None
 
-            await conn.execute(text(
-                "INSERT INTO products "
-                "(external_id, name, description, price, supplier_price, "
-                "category_id, category_name, vendor, vendor_code, image_url, "
-                "available, xml_feed_id, currency) "
-                "VALUES (:eid, :name, :desc, :price, :sp, :cid, :cname, "
-                ":ven, :vc, :img, :avail, 3411, 'UAH')"
-            ), {
-                "eid": ext_id, "name": name, "desc": desc,
-                "price": price, "sp": supplier_price,
-                "cid": cat_id_int, "cname": cat_name,
-                "ven": vendor, "vc": vendor_code,
-                "img": image_url, "avail": avail,
-            })
+            # Unique group_id and slug
+            base_group = f"lm-{ext_id}" if ext_id else f"lm-{inserted}"
+            group_id = base_group
+            counter = 1
+            while group_id in used_group_ids:
+                group_id = f"{base_group}-{counter}"
+                counter += 1
+            used_group_ids.add(group_id)
+
+            base_slug = slugify(name)
+            slug = base_slug
+            counter = 1
+            while slug in used_slugs:
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+            used_slugs.add(slug)
+
+            product = Product(
+                external_id=ext_id,
+                group_id=group_id,
+                name=name,
+                slug=slug,
+                description=desc,
+                price=price,
+                supplier_price=supplier_price,
+                min_price=price,
+                max_price=price,
+                currency="UAH",
+                category_id=cat_id_int,
+                category_name=cat_name,
+                vendor=vendor,
+                vendor_code=vendor_code,
+                image_url=image_url,
+                images=pictures if pictures else None,
+                available=avail,
+            )
+            session.add(product)
             inserted += 1
+
+            if inserted % 100 == 0:
+                await session.commit()
+
+        await session.commit()
+
+    # 6. Update category product counts
+    async with AsyncSession(engine) as session:
+        for cat_id_str in cat_map:
+            if cat_id_str.isdigit():
+                result = await session.execute(
+                    text("SELECT COUNT(*) FROM products WHERE category_id = :cid"),
+                    {"cid": int(cat_id_str)}
+                )
+                count = result.scalar() or 0
+                await session.execute(
+                    text("UPDATE categories SET product_count = :cnt WHERE id = :cid"),
+                    {"cnt": count, "cid": int(cat_id_str)}
+                )
+        await session.commit()
 
     return {"imported": inserted, "categories": len(cat_map)}
 
 
 @router.get("/stats")
 async def stats():
-    async with engine.begin() as conn:
-        result = await conn.execute(text("SELECT COUNT(*) FROM products"))
+    async with AsyncSession(engine) as session:
+        result = await session.execute(text("SELECT COUNT(*) FROM products"))
         count = result.scalar()
     return {"products": count}
