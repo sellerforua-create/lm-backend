@@ -41,12 +41,12 @@ async def trigger_import():
     if not offers:
         return {"error": "0 offers found"}
 
-    # 3. Drop and recreate table
+    # 3. Drop and recreate table (SQLite compatible)
     async with engine.begin() as conn:
-        await conn.execute(text("DROP TABLE IF EXISTS products CASCADE"))
+        await conn.execute(text("DROP TABLE IF EXISTS products"))
         await conn.execute(text("""
             CREATE TABLE products (
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 external_id VARCHAR(255),
                 name TEXT NOT NULL,
                 description TEXT,
@@ -59,11 +59,11 @@ async def trigger_import():
                 vendor VARCHAR(255),
                 vendor_code VARCHAR(255),
                 image_url TEXT,
-                images JSONB,
-                available BOOLEAN DEFAULT true,
+                images TEXT,
+                available BOOLEAN DEFAULT 1,
                 xml_feed_id INTEGER,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """))
 
