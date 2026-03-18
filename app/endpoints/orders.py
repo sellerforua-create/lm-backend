@@ -25,6 +25,7 @@ class OrderItem(BaseModel):
     size: Optional[str] = None
     color: Optional[str] = None
     image_url: Optional[str] = None
+    vendor_code: Optional[str] = None
 
 
 class OrderCreate(BaseModel):
@@ -70,10 +71,11 @@ def _send_telegram_notification(order: Order) -> None:
         variant = item.get("variant_id")
         size = item.get("size")
         color = item.get("color")
+        vendor_code = item.get("vendor_code")
 
         details = []
-        if variant:
-            details.append(f"variant: {variant}")
+        if vendor_code:
+            details.append(f"арт: {vendor_code}")
         if size:
             details.append(f"розмір: {size}")
         if color:
